@@ -152,3 +152,18 @@ http_archive(
         "http://download.tensorflow.org/models/speech_commands_v0.01.zip",
     ],
 )
+
+# Uncomment and update the paths in these entries to build the Android demo.
+android_sdk_repository(
+	name = "androidsdk",
+	api_level = 26,
+	build_tools_version = "29.0.0-rc1",
+	# Replace with path to Android SDK on your system
+	path = "/home/user/AndroidSdk",
+)
+
+#Android NDK r12b is recommended (higher may cause issues with Bazel)
+android_ndk_repository(
+	name = "androidndk",
+	path = "/home/user/Android/Sdk/ndk-bundle"
+	api_level = 26) # This needs to be 14 or higher to compile TensorFlow.
