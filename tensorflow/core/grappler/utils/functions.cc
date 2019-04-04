@@ -410,8 +410,17 @@ class MakeFunctionDefHelper {
   // Updates Node inputs from GraphDef to FunctionDef format.
   Status AsFunctionDefNode(NodeDef* function_body_node) const;
 
+  bool IsInputNode(const NodeDef& node) const {
+    return input_nodes_.contains(node.name());
+  }
+
+  bool IsOutputNode(const NodeDef& node) const {
+    return output_nodes_.contains(node.name());
+  }
+
  private:
   absl::flat_hash_set<absl::string_view> input_nodes_;
+  absl::flat_hash_set<absl::string_view> output_nodes_;
   // Mapping from function body node name to output names range map.
   absl::flat_hash_map<string, tensorflow::NameRangeMap> function_body_outputs_;
 };
@@ -420,6 +429,9 @@ Status MakeFunctionDefHelper::Initialize(
     const GrapplerFunctionItem& item, const FunctionLibraryDefinition& flib) {
   for (const InputArgInstantiation& input_arg : item.inputs()) {
     input_nodes_.insert(input_arg.node_name);
+  }
+  for (const OutputArgInstantiation& output_arg : item.outputs()) {
+    output_nodes_.insert(output_arg.node_name);
   }
 
   for (const NodeDef& node : item.function_body().node()) {
@@ -499,17 +511,10 @@ Status MakeFunctionDef(const GrapplerFunctionItem& item,
   MakeFunctionDefHelper helper;
   TF_RETURN_IF_ERROR(helper.Initialize(item, flib));
 
-  // Keep track of '_Arg' nodes that were added to the graph in place of
-  // instantiated function input arguments.
-  absl::flat_hash_set<absl::string_view> input_nodes;
-  for (const InputArgInstantiation& input_arg : item.inputs()) {
-    input_nodes.insert(input_arg.node_name);
-  }
-
   // Mapping from the '_Retval' node name to the output tensor.
   absl::flat_hash_map<absl::string_view, string> output_tensors;
   for (const NodeDef& func_body_node : item.function_body().node()) {
-    if (!IsRetval(func_body_node)) continue;
+    if (!helper.IsOutputNode(func_body_node)) continue;
     if (func_body_node.input_size() != 1) {
       return errors::Internal("_Retval node must have single input: ",
                               SummarizeNodeDef(func_body_node));
@@ -563,8 +568,12 @@ Status MakeFunctionDef(const GrapplerFunctionItem& item,
 
   // Copy function body nodes to the FunctionDef and update input format
   for (const NodeDef& func_node : item.function_body().node()) {
-    // Do not copy input/output nodes.
-    if (IsArg(func_node) || IsRetval(func_node)) continue;
+    // Skip original `_Arg` and `_Retval` nodes. If node was converted to some
+    // other type (e.g. inputs converted to placeholders), we need to check that
+    // it's not registered as function input or output node.
+    if (IsArg(func_node) || IsRetval(func_node) ||
+        helper.IsInputNode(func_node) || helper.IsOutputNode(func_node))
+      continue;
 
     NodeDef* func_def_node = func->add_node_def();
     *func_def_node = func_node;
