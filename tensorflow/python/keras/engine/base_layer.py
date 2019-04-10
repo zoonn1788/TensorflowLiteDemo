@@ -26,8 +26,10 @@ import numpy as np
 from six.moves import zip  # pylint: disable=redefined-builtin
 
 from tensorflow.core.framework import node_def_pb2
+from tensorflow.python import autograph
 from tensorflow.python.distribute import values as distribute_values
 from tensorflow.python.eager import context
+from tensorflow.python.eager import execute
 from tensorflow.python.eager import function
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import func_graph
@@ -54,6 +56,7 @@ from tensorflow.python.training.tracking import base as trackable
 from tensorflow.python.training.tracking import data_structures
 from tensorflow.python.training.tracking import layer_utils as trackable_layer_utils
 from tensorflow.python.training.tracking import object_identity
+from tensorflow.python.util import compat
 from tensorflow.python.util import function_utils
 from tensorflow.python.util import nest
 from tensorflow.python.util import tf_decorator
@@ -215,12 +218,6 @@ class Layer(trackable.Trackable):
       self._initial_weights = kwargs['weights']
     else:
       self._initial_weights = None
-
-    # This flag is used to keep track of whether symbolic tensors are added to
-    # the model outside of the call context. This is required for disabling
-    # `run_eagerly` on compile.
-    # TODO(b/124303407): Remove this flag after we add support for the use case.
-    self._contains_symbolic_tensors = False
 
   def build(self, input_shape):
     """Creates the variables of the layer (optional, for subclass implementers).
@@ -569,7 +566,7 @@ class Layer(trackable.Trackable):
         not base_layer_utils.is_in_call_context()):
       self._clear_losses()
 
-    with base_layer_utils.call_context():
+    with base_layer_utils.call_context(self):
       # Check input assumptions set after layer building, e.g. input shape.
       if build_graph:
         # Symbolic execution on symbolic tensors. We will attempt to build
@@ -581,9 +578,30 @@ class Layer(trackable.Trackable):
           # Build layer if applicable (if the `build` method has been
           # overridden).
           self._maybe_build(inputs)
+
+          # Wrapping `call` function in autograph to allow for dynamic control
+          # dependencies in call. We are limiting this to subclassed layers as
+          # autograph is strictly needed only for subclassed layers.
+          if base_layer_utils.is_subclassed(self):
+            decorators, original_func = tf_decorator.unwrap(self.call)
+            # TODO(psv): Remove optional_features param from the call here
+            # after b/129001876 is fixed.
+            converted_func = autograph.convert(
+                recursive=True, optional_features=None)(
+                    original_func)
+            if decorators:
+              call_fn = tf_decorator.rewrap(self.call, original_func,
+                                            converted_func)
+            else:
+              call_fn = converted_func
+          else:
+            call_fn = self.call
+
           # Explicitly pass the learning phase placeholder to `call` if
           # the `training` argument was left unspecified by the user.
           # This behavior is restricted to the managed Keras FuncGraph.
+          # TODO(omalleyt): Reconcile this with new `trainable` behavior
+          # when available.
           learning_phase_passed_by_framework = False
           if (self._expects_training_arg and
               not base_layer_utils.training_arg_passed_to_call(
@@ -598,20 +616,18 @@ class Layer(trackable.Trackable):
                   self._mixed_precision_policy.should_cast_variables), (
                       base_layer_utils.AutoAddUpdates(self,
                                                       inputs)) as auto_updater:
-                outputs = self.call(inputs, *args, **kwargs)
+                outputs = call_fn(inputs, *args, **kwargs)
                 auto_updater.set_outputs(outputs)
 
             except TypeError as e:
-              messages = ('`tf.Tensor` as a Python `bool` is not allowed',
-                          'Tensor objects are only iterable when eager')
               exception_str = str(e)
-              for msg in messages:
-                if msg in exception_str:
-                  raise TypeError('You are attempting to use Python control '
-                                  'flow in a layer that was not declared to be '
-                                  'dynamic. Pass `dynamic=True` to the class '
-                                  'constructor.\nEncountered error:\n"""\n' +
-                                  exception_str + '\n"""')
+              exception_msg = 'Tensor objects are only iterable when eager'
+              if exception_msg in exception_str:
+                raise TypeError('You are attempting to use Python control '
+                                'flow in a layer that was not declared to be '
+                                'dynamic. Pass `dynamic=True` to the class '
+                                'constructor.\nEncountered error:\n"""\n' +
+                                exception_str + '\n"""')
               raise
           else:
             # We will use static shape inference to return symbolic tensors
@@ -657,6 +673,7 @@ class Layer(trackable.Trackable):
           self._initial_weights is not None):
         self.set_weights(self._initial_weights)
         del self._initial_weights
+
     return outputs
 
   @property
@@ -895,6 +912,8 @@ class Layer(trackable.Trackable):
           'You provided aggregation=`%s`' % aggregation)
 
     is_symbolic = tf_utils.is_symbolic_tensor(value)
+    call_context = base_layer_utils.is_in_call_context()
+
     if name is None and (not is_symbolic or not hasattr(value, '_metric_obj')):
       # Eg. `self.add_metric(math_ops.reduce_sum(x), aggregation='mean')`
       # In eager mode, we use metric name to lookup a metric. Without a name,
@@ -911,11 +930,35 @@ class Layer(trackable.Trackable):
                        '`self.add_metric(tf.reduce_sum(inputs), '
                        'name=\'mean_activation\', aggregation=\'mean\')`')
 
-    if is_symbolic:
-      with backend.get_graph().as_default():
-        self._symbolic_add_metric(value, aggregation, name)
+    if call_context:
+      if is_symbolic:
+        with backend.get_graph().as_default():
+          self._symbolic_add_metric(value, aggregation, name)
+      else:
+        self._eager_add_metric(value, aggregation, name)
     else:
-      self._eager_add_metric(value, aggregation, name)
+      if not is_symbolic:
+        raise ValueError('Expected a symbolic Tensor for the metric value, '
+                         'received: ' + str(value))
+
+      # Possible a metric was added in a Layer's `build`.
+      if not getattr(self, '_is_graph_network', False):
+        with backend.get_graph().as_default():
+          self._symbolic_add_metric(value, aggregation, name)
+        return
+
+      if getattr(value, '_metric_obj', None):
+        raise ValueError('Using the result of calling a `Metric` object '
+                         'when calling `add_metric` on a Functional '
+                         'Model is not supported. Please pass the '
+                         'Tensor to monitor directly.')
+
+      # Insert layers into the Keras Graph Network.
+      new_layers = base_layer_utils.create_keras_history(value)
+      add_metric_layer = AddMetric(aggregation, name)
+      add_metric_layer(value)
+      new_layers.append(add_metric_layer)
+      self._insert_layers(new_layers)
 
   @doc_controls.for_subclass_implementers
   def add_update(self, updates, inputs=None):
@@ -936,7 +979,10 @@ class Layer(trackable.Trackable):
     execution).
 
     Arguments:
-      updates: Update op, or list/tuple of update ops.
+      updates: Update op, or list/tuple of update ops, or zero-arg callable
+        that returns an update op. A zero-arg callable should be passed in
+        order to disable running the updates by setting `trainable=False`
+        on this Layer, when executing in Eager mode.
       inputs: If anything other than None is passed, it signals the updates
         are conditional on some of the layer's inputs,
         and thus they should only be run where these inputs are available.
@@ -946,10 +992,20 @@ class Layer(trackable.Trackable):
         have is available at runtime.
         A step counter might fall into this category.
     """
+    updates = generic_utils.to_list(updates)
+
     if context.executing_eagerly():
+      # Don't run callable updates if currently executing inside the `call`
+      # of a Layer/Model with `trainable=False`.
+      if not base_layer_utils.is_in_frozen_context():
+        for update in updates:
+          if callable(update):
+            update()
       return  # Updates already applied when in eager mode.
 
     def process_update(x):
+      if callable(x):
+        x = x()
       if isinstance(x, ops.Operation):
         return x
       elif hasattr(x, 'op'):
@@ -957,7 +1013,6 @@ class Layer(trackable.Trackable):
       else:
         return ops.convert_to_tensor(x)
 
-    updates = generic_utils.to_list(updates)
     updates = [process_update(x) for x in updates]
     self._updates += updates
     if inputs is None:
@@ -1447,21 +1502,23 @@ class Layer(trackable.Trackable):
     # If the given metric is available in `metrics` list we just update state
     # on it, otherwise we create a new metric instance and
     # add it to the `metrics` list.
+    metric_obj = getattr(value, '_metric_obj', None)
+    if metric_obj:
+      name = metric_obj.name
+
     match = self._get_existing_metric(name)
     if match:
-      match(value)  # Update the metric state.
+      # Tensors that come from a Metric object already updated the Metric state.
+      if not metric_obj:
+        match(value)
       return
-    else:
-      # Aggregation will always be set in this use case. If not we will raise
-      # error on model/layer call in graph function mode when model/layer is
-      # created.
+
+    if not metric_obj:
       assert aggregation is not None
       metric_obj, _ = base_layer_utils.create_mean_metric(value, name)
-      self._metrics.append(metric_obj)
+    self._metrics.append(metric_obj)
 
   def _symbolic_add_metric(self, value, aggregation=None, name=None):
-    if not base_layer_utils.is_in_call_context():
-      self._contains_symbolic_tensors = True
     if aggregation is None:
       # Iterate over the metrics and check if the given metric exists already.
       # This can happen when a metric instance is created in subclassed model
@@ -2110,6 +2167,18 @@ class TensorFlowOpLayer(Layer):
       c_op = ops._create_c_op(graph, self.node_def, inputs, control_inputs=[])
       op = graph._create_op_from_tf_operation(c_op)
 
+      # Record the gradient because custom-made ops don't go through the
+      # code-gen'd eager call path
+      op_type = compat.as_str(op.op_def.name)
+      attr_names = [compat.as_str(attr.name) for attr in op.op_def.attr]
+      attrs = []
+      for attr_name in attr_names:
+        attrs.append(attr_name)
+        attrs.append(op.get_attr(attr_name))
+      attrs = tuple(attrs)
+      execute.record_gradient(op_type, op.inputs, attrs, op.outputs,
+                              op.name)
+
       if len(op.outputs) == 1:
         return op.outputs[0]
       return op.outputs
@@ -2148,6 +2217,32 @@ class AddLoss(Layer):
   def get_config(self):
     config = super(AddLoss, self).get_config()
     config.update({'unconditional': self.unconditional})
+    return config
+
+
+class AddMetric(Layer):
+  """Adds its inputs as a metric.
+
+  Attributes:
+    aggregation: 'mean' or None. How the inputs should be aggregated.
+    metric_name: The name to use for this metric.
+  """
+
+  def __init__(self, aggregation=None, metric_name=None, **kwargs):
+    super(AddMetric, self).__init__(**kwargs)
+    self.aggregation = aggregation
+    self.metric_name = metric_name
+
+  def call(self, inputs):
+    self.add_metric(inputs, self.aggregation, self.metric_name)
+    return inputs
+
+  def get_config(self):
+    config = super(AddMetric, self).get_config()
+    config.update({
+        'aggregation': self.aggregation,
+        'metric_name': self.metric_name
+    })
     return config
 
 

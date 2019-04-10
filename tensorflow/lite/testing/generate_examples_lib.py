@@ -368,10 +368,6 @@ def toco_convert(
   # Convert ophint ops if presented.
   graph_def = tf.lite.experimental.convert_op_hints_to_stubs(
       graph_def=graph_def)
-  # Warning: `remove_training_nodes` now incorreclty remove all
-  # TF Functions.
-  # TODO(ycling): Investigate. Required for functional control flow.
-  graph_def = tf.graph_util.remove_training_nodes(graph_def)
   graph_def_str = graph_def.SerializeToString()
 
   extra_toco_options = kwargs.get("extra_toco_options", ExtraTocoOptions())
@@ -749,7 +745,7 @@ def make_elu_tests(options):
 
 @register_make_test_function()
 def make_identity_tests(options):
-  """Make a set of tests to do relu."""
+  """Make a set of tests to do identity."""
 
   # Chose a set of parameters
   test_parameters = [{
@@ -760,16 +756,19 @@ def make_identity_tests(options):
   def build_graph(parameters):
     input_tensor = tf.placeholder(
         dtype=tf.float32, name="input", shape=parameters["input_shape"])
-    # Toco crashes when the model has only one single Identity op. As a
-    # workaround for testing, we put MULs before and after the identity.
-    # TODO(b/129197312): Remove the workaround after the issue is fixed.
+    # We add the Multiply before Identity just as a walk-around to make the test
+    # pass when input_shape is scalar.
+    # During graph transformation, TOCO will replace the Identity op with
+    # Reshape when input has shape. However, currently TOCO can't distinguish
+    # between missing shape and scalar shape. As a result, when input has scalar
+    # shape, this conversion still fails.
+    # TODO(b/129197312), remove the walk-around code once the bug is fixed.
     input_doubled = input_tensor * 2.0
     if parameters["use_snapshot"]:
-      identity_output = array_ops.snapshot(input_tensor)
+      identity_output = array_ops.snapshot(input_doubled)
     else:
-      identity_output = tf.identity(input_tensor)
-    out = identity_output * 2.0
-    return [input_tensor], [out]
+      identity_output = tf.identity(input_doubled)
+    return [input_tensor], [identity_output]
 
   def build_inputs(parameters, sess, inputs, outputs):
     input_values = create_tensor_data(
@@ -3744,7 +3743,7 @@ def make_slice_tests(options):
   test_parameters = [
       # 4-D
       {
-          "dtype": [tf.float32, tf.int32, tf.int64],
+          "dtype": [tf.float32, tf.int32, tf.int64, tf.string],
           "index_type": [tf.int32, tf.int64],
           "input_shape": [[12, 2, 2, 5]],
           "begin": [[0, 0, 0, 0], [1, 0, 1, 0]],
@@ -3752,7 +3751,7 @@ def make_slice_tests(options):
       },
       # 2-D
       {
-          "dtype": [tf.float32, tf.int32, tf.int64],
+          "dtype": [tf.float32, tf.int32, tf.int64, tf.string],
           "index_type": [tf.int32, tf.int64],
           "input_shape": [[2, 3]],
           "begin": [[0, 0], [1, 0]],
@@ -3795,7 +3794,7 @@ def make_slice_tests(options):
       test_parameters,
       build_graph,
       build_inputs,
-      expected_tf_failures=18)
+      expected_tf_failures=24)
 
 
 @register_make_test_function()
@@ -4785,6 +4784,47 @@ def make_unidirectional_sequence_rnn_tests(options):
       build_inputs,
       use_frozen_graph=True)
 
+
+@register_make_test_function()
+def make_unfused_gru_tests(options):
+  """Make a set of tests for unfused gru op."""
+
+  test_parameters = [{
+      "units": [2, 5],
+      "batch_size": [1, 2],
+      "time": [3],
+  }]
+
+  def build_graph(parameters):
+    inputs = [
+        tf.placeholder(tf.float32,
+                       [parameters["batch_size"], parameters["units"]])
+        for _ in range(parameters["time"])
+    ]
+    cell_fw = tf.nn.rnn_cell.GRUCell(parameters["units"])
+    cell_bw = tf.nn.rnn_cell.GRUCell(parameters["units"])
+    outputs, _, _ = tf.nn.static_bidirectional_rnn(
+        cell_fw, cell_bw, inputs, dtype=tf.float32)
+
+    return inputs, outputs
+
+  def build_inputs(parameters, sess, inputs, outputs):
+    input_values = [
+        create_tensor_data(tf.float32,
+                           [parameters["batch_size"], parameters["units"]])
+        for _ in range(parameters["time"])
+    ]
+    init = tf.global_variables_initializer()
+    sess.run(init)
+    return input_values, sess.run(
+        outputs, feed_dict=dict(zip(inputs, input_values)))
+
+  make_zip_of_tests(
+      options,
+      test_parameters,
+      build_graph,
+      build_inputs,
+      use_frozen_graph=True)
 
 # Toco binary path provided by the generate rule.
 bin_path = None

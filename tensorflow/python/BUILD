@@ -182,6 +182,7 @@ py_library(
         "//tensorflow/python/distribute:estimator_training",
         "//tensorflow/python/eager:def_function",
         "//tensorflow/python/eager:execution_callbacks",
+        "//tensorflow/python/eager:monitoring",
         "//tensorflow/python/eager:profiler",
         "//tensorflow/python/eager:profiler_client",
         "//tensorflow/python/eager:remote",
@@ -1367,6 +1368,25 @@ tf_py_test(
 )
 
 tf_py_test(
+    name = "benchmark_test",
+    size = "small",
+    srcs = [
+        "platform/benchmark.py",
+        "platform/benchmark_test.py",
+    ],
+    additional_deps = [
+        ":client_testlib",
+        ":platform",
+    ],
+    main = "platform/benchmark_test.py",
+    tags = [
+        "manual",
+        "no_pip",
+        "notap",
+    ],
+)
+
+tf_py_test(
     name = "proto_test",
     size = "small",
     srcs = ["framework/proto_test.py"],
@@ -1941,6 +1961,38 @@ tf_gen_op_wrapper_private_py(
     ],
 )
 
+py_library(
+    name = "batch_ops",
+    srcs = [
+        "ops/batch_ops.py",
+    ],
+    srcs_version = "PY2AND3",
+    deps = [
+        ":batch_ops_gen",
+    ],
+)
+
+py_test(
+    name = "batch_ops_test",
+    size = "small",
+    srcs = ["ops/batch_ops_test.py"],
+    srcs_version = "PY2AND3",
+    tags = [
+        "manual",
+        "no_pip",
+        "nomac",
+    ],
+    deps = [
+        ":batch_ops",
+        "//tensorflow/python:array_ops",
+        "//tensorflow/python:client_testlib",
+        "//tensorflow/python:dtypes",
+        "//tensorflow/python:framework",
+        "//tensorflow/python:gradients",
+        "//tensorflow/python:script_ops",
+    ],
+)
+
 tf_gen_op_wrapper_private_py(
     name = "manip_ops_gen",
     visibility = [
@@ -2361,6 +2413,7 @@ py_library(
     deps = [
         ":control_flow_util",
         ":framework_ops",
+        ":util",
         "//tensorflow/core:protos_all_py",
         "//tensorflow/python/eager:context",
         "//tensorflow/python/eager:function",
@@ -3284,6 +3337,7 @@ py_library(
     deps = [
         ":array_grad",
         ":array_ops",
+        ":batch_ops",
         ":check_ops",
         ":clip_ops",
         ":confusion_matrix",

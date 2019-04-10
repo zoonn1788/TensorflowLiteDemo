@@ -3983,6 +3983,36 @@ func BoostedTreesSerializeEnsemble(scope *Scope, tree_ensemble_handle tf.Output)
 	return op.Output(0), op.Output(1)
 }
 
+// Aggregates the summary of accumulated stats for the batch.
+//
+// The summary stats contains gradients and hessians accumulated for each node, feature dimension id and bucket.
+//
+// Arguments:
+//	node_ids: int32; Rank 1 Tensor containing node ids for each example, shape [batch_size].
+//	gradients: float32; Rank 2 Tensor (shape=[batch_size, logits_dimension]) with gradients for each example.
+//	hessians: float32; Rank 2 Tensor (shape=[batch_size, hessian_dimension]) with hessians for each example.
+//	feature: int32; Rank 2 feature Tensors (shape=[batch_size, feature_dimension]).
+//	max_splits: int; the maximum number of splits possible in the whole tree.
+//	num_buckets: int; equals to the maximum possible value of bucketized feature.
+//
+// Returns output Rank 4 Tensor (shape=[splits, feature_dimension, buckets, logits_dimension + hessian_dimension])
+// containing accumulated stats for each node, feature dimension and bucket.
+func BoostedTreesAggregateStats(scope *Scope, node_ids tf.Output, gradients tf.Output, hessians tf.Output, feature tf.Output, max_splits int64, num_buckets int64) (stats_summary tf.Output) {
+	if scope.Err() != nil {
+		return
+	}
+	attrs := map[string]interface{}{"max_splits": max_splits, "num_buckets": num_buckets}
+	opspec := tf.OpSpec{
+		Type: "BoostedTreesAggregateStats",
+		Input: []tf.Input{
+			node_ids, gradients, hessians, feature,
+		},
+		Attrs: attrs,
+	}
+	op := scope.AddOperation(opspec)
+	return op.Output(0)
+}
+
 // Makes the summary of accumulated stats for the batch.
 //
 // The summary stats contains gradients and hessians accumulated into the corresponding node and bucket for each example.
@@ -8547,6 +8577,46 @@ func MakeIterator(scope *Scope, dataset tf.Output, iterator tf.Output) (o *tf.Op
 	return scope.AddOperation(opspec)
 }
 
+// A container for an iterator resource.
+//
+// Returns A handle to the iterator that can be passed to a "MakeIterator" or
+// "IteratorGetNext" op. In contrast to Iterator, AnonymousIterator prevents
+// resource sharing by name, and does not keep a reference to the resource
+// container.A variant deleter that should be passed into the op that deletes the iterator.
+func AnonymousIteratorV2(scope *Scope, output_types []tf.DataType, output_shapes []tf.Shape) (handle tf.Output, deleter tf.Output) {
+	if scope.Err() != nil {
+		return
+	}
+	attrs := map[string]interface{}{"output_types": output_types, "output_shapes": output_shapes}
+	opspec := tf.OpSpec{
+		Type: "AnonymousIteratorV2",
+
+		Attrs: attrs,
+	}
+	op := scope.AddOperation(opspec)
+	return op.Output(0), op.Output(1)
+}
+
+// A container for an iterator resource.
+//
+// Returns A handle to the iterator that can be passed to a "MakeIterator" or
+// "IteratorGetNext" op. In contrast to Iterator, AnonymousIterator prevents
+// resource sharing by name, and does not keep a reference to the resource
+// container.
+func AnonymousIterator(scope *Scope, output_types []tf.DataType, output_shapes []tf.Shape) (handle tf.Output) {
+	if scope.Err() != nil {
+		return
+	}
+	attrs := map[string]interface{}{"output_types": output_types, "output_shapes": output_shapes}
+	opspec := tf.OpSpec{
+		Type: "AnonymousIterator",
+
+		Attrs: attrs,
+	}
+	op := scope.AddOperation(opspec)
+	return op.Output(0)
+}
+
 // Deserialize bucket boundaries and ready flag into current QuantileAccumulator.
 //
 // An op that deserializes bucket boundaries and are boundaries ready flag into current QuantileAccumulator.
@@ -9508,6 +9578,51 @@ func ResourceApplyAdagradDA(scope *Scope, var_ tf.Output, gradient_accumulator t
 		Attrs: attrs,
 	}
 	return scope.AddOperation(opspec)
+}
+
+// A container for an iterator resource.
+//
+// Returns A handle to the iterator that can be passed to a "MakeIterator"
+// or "IteratorGetNext" op.
+func Iterator(scope *Scope, shared_name string, container string, output_types []tf.DataType, output_shapes []tf.Shape) (handle tf.Output) {
+	if scope.Err() != nil {
+		return
+	}
+	attrs := map[string]interface{}{"shared_name": shared_name, "container": container, "output_types": output_types, "output_shapes": output_shapes}
+	opspec := tf.OpSpec{
+		Type: "Iterator",
+
+		Attrs: attrs,
+	}
+	op := scope.AddOperation(opspec)
+	return op.Output(0)
+}
+
+// Outputs a `Summary` protocol buffer with a histogram.
+//
+// The generated
+// [`Summary`](https://www.tensorflow.org/code/tensorflow/core/framework/summary.proto)
+// has one summary value containing a histogram for `values`.
+//
+// This op reports an `InvalidArgument` error if any value is not finite.
+//
+// Arguments:
+//	tag: Scalar.  Tag to use for the `Summary.Value`.
+//	values: Any shape. Values to use to build the histogram.
+//
+// Returns Scalar. Serialized `Summary` protocol buffer.
+func HistogramSummary(scope *Scope, tag tf.Output, values tf.Output) (summary tf.Output) {
+	if scope.Err() != nil {
+		return
+	}
+	opspec := tf.OpSpec{
+		Type: "HistogramSummary",
+		Input: []tf.Input{
+			tag, values,
+		},
+	}
+	op := scope.AddOperation(opspec)
+	return op.Output(0)
 }
 
 // MaxPool3DAttr is an optional argument to MaxPool3D.
@@ -20003,6 +20118,42 @@ func Max(scope *Scope, input tf.Output, axis tf.Output, optional ...MaxAttr) (ou
 	return op.Output(0)
 }
 
+// Draw bounding boxes on a batch of images.
+//
+// Outputs a copy of `images` but draws on top of the pixels zero or more bounding
+// boxes specified by the locations in `boxes`. The coordinates of the each
+// bounding box in `boxes` are encoded as `[y_min, x_min, y_max, x_max]`. The
+// bounding box coordinates are floats in `[0.0, 1.0]` relative to the width and
+// height of the underlying image.
+//
+// For example, if an image is 100 x 200 pixels (height x width) and the bounding
+// box is `[0.1, 0.2, 0.5, 0.9]`, the upper-left and bottom-right coordinates of
+// the bounding box will be `(40, 10)` to `(100, 50)` (in (x,y) coordinates).
+//
+// Parts of the bounding box may fall outside the image.
+//
+// Arguments:
+//	images: 4-D with shape `[batch, height, width, depth]`. A batch of images.
+//	boxes: 3-D with shape `[batch, num_bounding_boxes, 4]` containing bounding
+// boxes.
+//	colors: 2-D. A list of RGBA colors to cycle through for the boxes.
+//
+// Returns 4-D with the same shape as `images`. The batch of input images with
+// bounding boxes drawn on the images.
+func DrawBoundingBoxesV2(scope *Scope, images tf.Output, boxes tf.Output, colors tf.Output) (output tf.Output) {
+	if scope.Err() != nil {
+		return
+	}
+	opspec := tf.OpSpec{
+		Type: "DrawBoundingBoxesV2",
+		Input: []tf.Input{
+			images, boxes, colors,
+		},
+	}
+	op := scope.AddOperation(opspec)
+	return op.Output(0)
+}
+
 // Computes Psi, the derivative of Lgamma (the log of the absolute value of
 //
 // `Gamma(x)`), element-wise.
@@ -22581,6 +22732,26 @@ func RetrieveTPUEmbeddingFTRLParameters(scope *Scope, num_shards int64, shard_id
 	}
 	op := scope.AddOperation(opspec)
 	return op.Output(0), op.Output(1), op.Output(2)
+}
+
+// A container for an iterator resource.
+//
+// Arguments:
+//	handle: A handle to the iterator to delete.
+//	deleter: A variant deleter.
+//
+// Returns the created operation.
+func DeleteIterator(scope *Scope, handle tf.Output, deleter tf.Output) (o *tf.Operation) {
+	if scope.Err() != nil {
+		return
+	}
+	opspec := tf.OpSpec{
+		Type: "DeleteIterator",
+		Input: []tf.Input{
+			handle, deleter,
+		},
+	}
+	return scope.AddOperation(opspec)
 }
 
 // Quantized Batch normalization.
@@ -31388,6 +31559,77 @@ func Atan2(scope *Scope, y tf.Output, x tf.Output) (z tf.Output) {
 	return op.Output(0)
 }
 
+// TensorStridedSliceUpdateAttr is an optional argument to TensorStridedSliceUpdate.
+type TensorStridedSliceUpdateAttr func(optionalAttr)
+
+// TensorStridedSliceUpdateBeginMask sets the optional begin_mask attribute to value.
+// If not specified, defaults to 0
+func TensorStridedSliceUpdateBeginMask(value int64) TensorStridedSliceUpdateAttr {
+	return func(m optionalAttr) {
+		m["begin_mask"] = value
+	}
+}
+
+// TensorStridedSliceUpdateEndMask sets the optional end_mask attribute to value.
+// If not specified, defaults to 0
+func TensorStridedSliceUpdateEndMask(value int64) TensorStridedSliceUpdateAttr {
+	return func(m optionalAttr) {
+		m["end_mask"] = value
+	}
+}
+
+// TensorStridedSliceUpdateEllipsisMask sets the optional ellipsis_mask attribute to value.
+// If not specified, defaults to 0
+func TensorStridedSliceUpdateEllipsisMask(value int64) TensorStridedSliceUpdateAttr {
+	return func(m optionalAttr) {
+		m["ellipsis_mask"] = value
+	}
+}
+
+// TensorStridedSliceUpdateNewAxisMask sets the optional new_axis_mask attribute to value.
+// If not specified, defaults to 0
+func TensorStridedSliceUpdateNewAxisMask(value int64) TensorStridedSliceUpdateAttr {
+	return func(m optionalAttr) {
+		m["new_axis_mask"] = value
+	}
+}
+
+// TensorStridedSliceUpdateShrinkAxisMask sets the optional shrink_axis_mask attribute to value.
+// If not specified, defaults to 0
+func TensorStridedSliceUpdateShrinkAxisMask(value int64) TensorStridedSliceUpdateAttr {
+	return func(m optionalAttr) {
+		m["shrink_axis_mask"] = value
+	}
+}
+
+// Assign `value` to the sliced l-value reference of `input`.
+//
+// The values of `value` are assigned to the positions in the tensor `input` that
+// are selected by the slice parameters. The slice parameters `begin` `end`
+// `strides` etc. work exactly as in `StridedSlice`.
+//
+// NOTE this op currently does not support broadcasting and so `value`'s shape
+// must be exactly the shape produced by the slice of `input`.
+//
+// Returns the created operation.
+func TensorStridedSliceUpdate(scope *Scope, input tf.Output, begin tf.Output, end tf.Output, strides tf.Output, value tf.Output, optional ...TensorStridedSliceUpdateAttr) (o *tf.Operation) {
+	if scope.Err() != nil {
+		return
+	}
+	attrs := map[string]interface{}{}
+	for _, a := range optional {
+		a(attrs)
+	}
+	opspec := tf.OpSpec{
+		Type: "TensorStridedSliceUpdate",
+		Input: []tf.Input{
+			input, begin, end, strides, value,
+		},
+		Attrs: attrs,
+	}
+	return scope.AddOperation(opspec)
+}
+
 // Compute the regularized incomplete beta integral \\(I_x(a, b)\\).
 //
 // The regularized incomplete beta integral is defined as:
@@ -39515,71 +39757,6 @@ func TFRecordDataset(scope *Scope, filenames tf.Output, compression_type tf.Outp
 		Input: []tf.Input{
 			filenames, compression_type, buffer_size,
 		},
-	}
-	op := scope.AddOperation(opspec)
-	return op.Output(0)
-}
-
-// Outputs a `Summary` protocol buffer with a histogram.
-//
-// The generated
-// [`Summary`](https://www.tensorflow.org/code/tensorflow/core/framework/summary.proto)
-// has one summary value containing a histogram for `values`.
-//
-// This op reports an `InvalidArgument` error if any value is not finite.
-//
-// Arguments:
-//	tag: Scalar.  Tag to use for the `Summary.Value`.
-//	values: Any shape. Values to use to build the histogram.
-//
-// Returns Scalar. Serialized `Summary` protocol buffer.
-func HistogramSummary(scope *Scope, tag tf.Output, values tf.Output) (summary tf.Output) {
-	if scope.Err() != nil {
-		return
-	}
-	opspec := tf.OpSpec{
-		Type: "HistogramSummary",
-		Input: []tf.Input{
-			tag, values,
-		},
-	}
-	op := scope.AddOperation(opspec)
-	return op.Output(0)
-}
-
-// A container for an iterator resource.
-//
-// Returns A handle to the iterator that can be passed to a "MakeIterator"
-// or "IteratorGetNext" op.
-func Iterator(scope *Scope, shared_name string, container string, output_types []tf.DataType, output_shapes []tf.Shape) (handle tf.Output) {
-	if scope.Err() != nil {
-		return
-	}
-	attrs := map[string]interface{}{"shared_name": shared_name, "container": container, "output_types": output_types, "output_shapes": output_shapes}
-	opspec := tf.OpSpec{
-		Type: "Iterator",
-
-		Attrs: attrs,
-	}
-	op := scope.AddOperation(opspec)
-	return op.Output(0)
-}
-
-// A container for an iterator resource.
-//
-// Returns A handle to the iterator that can be passed to a "MakeIterator" or
-// "IteratorGetNext" op. In contrast to Iterator, AnonymousIterator prevents
-// resource sharing by name, and does not keep a reference to the resource
-// container.
-func AnonymousIterator(scope *Scope, output_types []tf.DataType, output_shapes []tf.Shape) (handle tf.Output) {
-	if scope.Err() != nil {
-		return
-	}
-	attrs := map[string]interface{}{"output_types": output_types, "output_shapes": output_shapes}
-	opspec := tf.OpSpec{
-		Type: "AnonymousIterator",
-
-		Attrs: attrs,
 	}
 	op := scope.AddOperation(opspec)
 	return op.Output(0)

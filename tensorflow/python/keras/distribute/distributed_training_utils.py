@@ -23,6 +23,7 @@ import numpy as np
 from tensorflow.python.data.ops import dataset_ops
 from tensorflow.python.data.ops import iterator_ops
 from tensorflow.python.distribute import distribute_coordinator_context as dc_context
+from tensorflow.python.distribute import distribution_strategy_context as ds_context
 from tensorflow.python.distribute import reduce_util
 from tensorflow.python.eager import context
 from tensorflow.python.framework import dtypes
@@ -174,11 +175,12 @@ def validate_callbacks(input_callbacks, optimizer):
   """
   if input_callbacks:
     for callback in input_callbacks:
-      if callback not in [callbacks.TensorBoard, callbacks.ReduceLROnPlateau,
-                          callbacks.LearningRateScheduler, callbacks.CSVLogger,
-                          callbacks.EarlyStopping, callbacks.ModelCheckpoint,
-                          callbacks.TerminateOnNaN, callbacks.ProgbarLogger,
-                          callbacks.History, callbacks.RemoteMonitor]:
+      if not isinstance(callback,
+                        (callbacks.TensorBoard, callbacks.ReduceLROnPlateau,
+                         callbacks.LearningRateScheduler, callbacks.CSVLogger,
+                         callbacks.EarlyStopping, callbacks.ModelCheckpoint,
+                         callbacks.TerminateOnNaN, callbacks.ProgbarLogger,
+                         callbacks.History, callbacks.RemoteMonitor)):
         logging.warning('Your input callback is not one of the predefined '
                         'Callbacks that supports DistributionStrategy. You '
                         'might encounter an error if you access one of the '
@@ -914,6 +916,37 @@ def _generate_cache_key(mode):
 def distributed_scope(strategy, learning_phase):
   with strategy.scope(), K.learning_phase_scope(learning_phase):
     yield
+
+
+def call_replica_local_fn(fn, *args, **kwargs):
+  """Call a function that uses replica-local variables.
+
+  This function correctly handles calling `fn` in a cross-replica
+  context.
+
+  Arguments:
+    fn: The function to call.
+    *args: Positional arguments to the `fn`.
+    **kwargs: Keyword argument to `fn`.
+
+  Returns:
+    The result of calling `fn`.
+  """
+  # TODO(b/120571621): We want to avoid reductions here since
+  # since TPUStrategy does not implement replica local variables.
+  # Remove this hack once we support TPUReplicaLocalVariables.
+  strategy = None
+  if 'strategy' in kwargs:
+    strategy = kwargs.pop('strategy')
+  else:
+    if ds_context.get_strategy():
+      strategy = ds_context.get_strategy()
+
+  is_tpu = is_tpu_strategy(strategy)
+  if ((not is_tpu) and strategy and ds_context.in_cross_replica_context()):
+    with strategy.scope():
+      return strategy.extended.call_for_each_replica(fn, args, kwargs)
+  return fn(*args, **kwargs)
 
 
 def is_current_worker_chief():
