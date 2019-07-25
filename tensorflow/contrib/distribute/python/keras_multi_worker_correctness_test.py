@@ -33,6 +33,7 @@ from tensorflow.python.distribute import combinations
 from tensorflow.python.distribute import multi_worker_util
 from tensorflow.python.distribute.cluster_resolver import TFConfigClusterResolver
 from tensorflow.python.framework import ops
+from tensorflow.python.keras.optimizer_v2 import gradient_descent
 from tensorflow.python.platform import test
 
 
@@ -52,21 +53,6 @@ def get_num_workers():
     task_type = cluster_resolver.task_type
     return int(multi_worker_util.worker_count(cluster_spec, task_type))
   return 1
-
-
-def batch_and_maybe_shard_dataset(dataset, global_batch_size):
-  """Shard the dataset if running in multi-node environment."""
-
-  cluster_resolver = TFConfigClusterResolver()
-  cluster_spec = cluster_resolver.cluster_spec().as_dict()
-  if cluster_spec:
-    task_type = cluster_resolver.task_type
-    task_id = cluster_resolver.task_id
-    num_workers = int(multi_worker_util.worker_count(cluster_spec, task_type))
-    id_in_cluster = int(
-        multi_worker_util.id_in_cluster(cluster_spec, task_type, task_id))
-    dataset = dataset.shard(num_workers, id_in_cluster)
-  return dataset.batch(global_batch_size)
 
 
 class Bias(keras.layers.Layer):
@@ -89,17 +75,20 @@ class SimpleBiasTest(
       # Make sure Session is cleared at the start of each run.
       keras.backend._SESSION.session = None
 
-      x = ops.convert_to_tensor([[0.], [1.], [2.], [0.], [1.], [2.]])
-      y = ops.convert_to_tensor([[0.5], [2.], [3.5], [0.5], [2.], [3.5]])
+      x = ops.convert_to_tensor([[0.], [1.], [2.], [0.], [1.], [2.], [0.],
+                                 [1.]])
+      y = ops.convert_to_tensor([[0.5], [2.], [3.5], [0.5], [2.], [3.5], [0.5],
+                                 [2.]])
       ds = dataset_ops.Dataset.from_tensor_slices((x, y))
-      ds = batch_and_maybe_shard_dataset(ds, global_batch_size=6)
+      ds = ds.batch(8)
       model = keras.Sequential([Bias(input_shape=(1,))])
       model.compile(
           keras.optimizer_v2.gradient_descent.SGD(0.1), 'mae', metrics=['mae'])
       history = model.fit(ds, epochs=5)
-      self.assertAllClose(history.history['loss'], [1., 0.9, 0.8, 0.7, 0.6])
+      self.assertAllClose(history.history['loss'],
+                          [0.9375, 0.8375, 0.7375, 0.6375, 0.5375])
       self.assertAllClose(history.history['mean_absolute_error'],
-                          [1., 0.9, 0.8, 0.7, 0.6])
+                          [0.9375, 0.8375, 0.7375, 0.6375, 0.5375])
 
       results = {'training': history.history}
       if results_without_ds:
@@ -144,26 +133,25 @@ def make_image_model(initial_weights=None):
   return model, IMAGE_INPUTS, IMAGE_TARGETS
 
 
-# TODO(b/130243026): Re-enable this test.
 def make_lstm_model(initial_weights=None):
   inputs = keras.layers.Input(shape=(10, 20))
-  rnn1_out = keras.layers.LSTM(20, return_sequences=True)(inputs)
-  rnn2_out = keras.layers.LSTM(10)(rnn1_out)
-  outputs = keras.layers.Dense(1)(rnn2_out)
+  rnn_out = keras.layers.LSTM(4)(inputs)
+  outputs = keras.layers.Dense(1)(rnn_out)
   model = keras.Model(inputs, outputs)
 
   if initial_weights:
     model.set_weights(initial_weights)
 
-  model.compile('adam', 'binary_crossentropy', metrics=['mse'])
+  model.compile(
+      gradient_descent.SGD(0.1),
+      'sparse_categorical_crossentropy',
+      metrics=['sparse_categorical_crossentropy'])
 
   return model, LSTM_INPUTS, LSTM_TARGETS
 
 
 def make_embedding_model(initial_weights=None):
-  # TODO(b/130231718): Remove batch_size here.
-  inputs = keras.layers.Input(
-      batch_size=64 // get_num_workers(), shape=(1,), dtype='int32')
+  inputs = keras.layers.Input(shape=(1,), dtype='int32')
   embeddings = keras.layers.Embedding(100, 5)(inputs)
   outputs = keras.layers.Dense(1, activation='softmax')(embeddings)
   model = keras.Model(inputs, outputs)
@@ -182,7 +170,7 @@ class ModelCorrectnessTest(
 
   def make_dataset(self, inputs, targets, batch_size=64):
     dataset = dataset_ops.Dataset.from_tensor_slices((inputs, targets))
-    dataset = batch_and_maybe_shard_dataset(dataset, batch_size)
+    dataset = dataset.batch(batch_size)
     return dataset
 
   @combinations.generate(
@@ -191,9 +179,10 @@ class ModelCorrectnessTest(
           strategy_cls=[
               collective_strategy.CollectiveAllReduceStrategy,
           ],
-          make_model=[make_image_model, make_embedding_model],
+          make_model=[make_image_model, make_lstm_model, make_embedding_model],
+          steps_per_epoch=[50, None],
           required_gpus=[0, 1]))
-  def test_correctness(self, strategy_cls, make_model):
+  def test_correctness(self, strategy_cls, make_model, steps_per_epoch):
 
     def _worker_fn(initial_weights=None, results_without_ds=None):
       # Make sure Session is cleared at each run
@@ -207,7 +196,7 @@ class ModelCorrectnessTest(
 
       # TODO(b/129363441): Remove `steps_per_epoch`.
       results['training'] = model.fit(
-          data, steps_per_epoch=50, epochs=2).history
+          data, steps_per_epoch=steps_per_epoch, epochs=2).history
       results['trained_weights'] = model.get_weights()
 
       eval_data = self.make_dataset(inputs, targets)
@@ -218,6 +207,8 @@ class ModelCorrectnessTest(
           self.assertAllClose(
               results[key],
               results_without_ds[key],
+              rtol=1e-5,
+              atol=1e-5,
               msg='Fail to assert {}'.format(key))
 
       return results

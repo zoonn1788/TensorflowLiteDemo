@@ -24,6 +24,7 @@ limitations under the License.
 #include "tensorflow/core/framework/tensor_shape.pb.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/graph/graph.h"
+#include "tensorflow/core/grappler/grappler_item.h"
 #include "tensorflow/core/grappler/mutable_graph_view.h"
 #include "tensorflow/core/grappler/utils.h"
 #include "tensorflow/core/lib/core/errors.h"
@@ -112,6 +113,9 @@ NodeDef* GetInputNode(const NodeDef& node, const MutableGraphView& graph);
 NodeDef* GetInputNode(const NodeDef& node, const MutableGraphView& graph,
                       int64 i);
 
+// Gets the attr corresponding to a dataset node's output types, if it exists.
+Status GetDatasetOutputTypesAttr(const NodeDef& node, AttrValue* output_types);
+
 // Returns the list of indices of all nodes with the given op or empty list if
 // no such node exists.
 std::vector<int> FindAllGraphNodesWithOp(const string& op,
@@ -144,8 +148,10 @@ void ConcatAttributeList(const string& attribute_name, const NodeDef& first,
 // and renaming nodes does not mutate any edges.
 Status EnsureNodeNamesUnique(Graph* g);
 
-// Returns the sink node (i.e. last node) in the graph.
-Status FindSinkNode(const GraphDef& graph_def, NodeDef* sink_node);
+// Returns the item's fetch node, if there is exactly one. Otherwise, returns an
+// error.
+Status GetFetchNode(const MutableGraphView& graph, const GrapplerItem& item,
+                    NodeDef** fetch_node);
 
 }  // namespace graph_utils
 }  // namespace grappler

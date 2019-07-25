@@ -134,7 +134,7 @@ class SessionDebugTestBase(test_util.TensorFlowTestCase):
     """Run fetches with debugging and obtain DebugDumpDir.
 
     Args:
-      sess: the tf.Session to be used.
+      sess: the tf.compat.v1.Session to be used.
       fetches: fetches of the Session.run().
       feed_dict: feed dict for the Session.run().
       debug_ops: name(s) of the debug ops to be used.
@@ -1462,14 +1462,14 @@ class SessionDebugTestBase(test_util.TensorFlowTestCase):
 
       # Lookup should work with node name input.
       traceback = dump.node_traceback("traceback/w")
-      self.assertIsInstance(traceback, list)
+      self.assertIsInstance(traceback, tuple)
       self.assertGreater(len(traceback), 0)
       for trace in traceback:
         self.assertIsInstance(trace, tuple)
 
       # Lookup should also work with tensor name input.
       traceback = dump.node_traceback("traceback/w:0")
-      self.assertIsInstance(traceback, list)
+      self.assertIsInstance(traceback, tuple)
       self.assertGreater(len(traceback), 0)
       for trace in traceback:
         self.assertIsInstance(trace, tuple)
